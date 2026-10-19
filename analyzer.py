@@ -210,41 +210,105 @@ def text_score(text):
     return score, hits[:5]
 
 
-def candidates(transcript, energy, duration, limit=30):
-    groups, current = [], []
-    for item in transcript:
-        if not current:
-            current = [item]
-        elif item["end"] - current[0]["start"] <= 28 and item["start"] - current[-1]["end"] < 2.8:
-            current.append(item)
-        else:
-            groups.append(current)
-            current = [item]
-    if current:
-        groups.append(current)
-    results = []
-    for group in groups:
-        start = max(0.0, group[0]["start"] - 1.0)
-        end = min(duration, group[-1]["end"] + 1.5)
-        text = " ".join(x["text"] for x in group).strip()
-        if end - start < 4 or len(text.split()) < 5:
+def _ends_sentence(text):
+    """Whether transcript text appears to end a complete sentence/thought."""
+    return bool(text.rstrip().endswith((".", "!", "?", "…", '"', "”")))
+
+
+def candidates(transcript, energy, duration, limit=30, target_seconds=60):
+    """Find impactful excerpts near a minute, preferring complete sentence boundaries.
+
+    The transcript model does not provide true semantic discourse boundaries, so
+    punctuation and pauses are used as practical boundary signals. Shorter clips
+    remain eligible when they score strongly.
+    """
+    if not transcript:
+        return []
+
+    # Start candidate windows at sentence boundaries, while tolerating ASR segments
+    # that omit punctuation. A long pause is also a reasonable boundary.
+    starts = []
+    for i, item in enumerate(transcript):
+        if i == 0:
+            starts.append(i)
             continue
-        lo, hi = int(start), min(len(energy), max(int(start) + 1, math.ceil(end)))
-        vals = energy[lo:hi]
-        audio = sum(vals) / len(vals) if vals else 0.0
-        peak = max(vals) if vals else 0.0
-        spoken, hits = text_score(text)
-        score = 100 * (.40 * audio + .45 * spoken + .15 * peak)
-        results.append({
-            "start": round(start, 2), "end": round(end, 2), "score": round(score, 1),
-            "audio_score": round(audio, 3), "text_score": round(spoken, 3),
-            "peak_score": round(peak, 3), "text": text, "signals": hits
-        })
-    results.sort(key=lambda item: item["score"], reverse=True)
+        previous = transcript[i - 1]
+        gap = item["start"] - previous["end"]
+        if _ends_sentence(previous["text"]) or gap >= 1.0:
+            starts.append(i)
+
+    raw_results = []
+    seen_ranges = set()
+    min_seconds = 12.0
+    max_seconds = 82.0
+
+    for first in starts:
+        start_time = max(0.0, float(transcript[first]["start"]) - 0.5)
+        best = None
+        for last in range(first, len(transcript)):
+            item = transcript[last]
+            if last > first and item["start"] - transcript[last - 1]["end"] >= 2.8:
+                break
+            end_time = min(duration, float(item["end"]) + 0.5)
+            length = end_time - start_time
+            if length > max_seconds:
+                break
+            if length < min_seconds:
+                continue
+
+            # Prefer thought-ending punctuation. Near the target, allow the
+            # nearest segment boundary if Whisper omitted punctuation.
+            sentence_end = _ends_sentence(item["text"])
+            if not sentence_end and abs(length - target_seconds) > 8:
+                continue
+
+            text = " ".join(x["text"].strip() for x in transcript[first:last + 1]).strip()
+            if len(text.split()) < 12:
+                continue
+            # Penalize windows that are far from the target, but allow genuinely
+            # short, punchy excerpts to remain competitive.
+            duration_fit = max(0.45, 1.0 - abs(length - target_seconds) / target_seconds)
+            lo = max(0, int(start_time))
+            hi = min(len(energy), max(lo + 1, math.ceil(end_time)))
+            vals = energy[lo:hi]
+            audio = sum(vals) / len(vals) if vals else 0.0
+            peak = max(vals) if vals else 0.0
+            spoken, hits = text_score(text)
+            completeness = 1.0 if sentence_end else 0.78
+            score = 100 * (.36 * audio + .42 * spoken + .14 * peak + .08 * duration_fit)
+            score *= completeness
+            key = (round(start_time), round(end_time))
+            if key in seen_ranges:
+                continue
+            result = {
+                "start": round(start_time, 2), "end": round(end_time, 2),
+                "duration": round(length, 1), "score": round(score, 1),
+                "audio_score": round(audio, 3), "text_score": round(spoken, 3),
+                "peak_score": round(peak, 3), "text": text, "signals": hits,
+                "complete_thought": sentence_end,
+            }
+            # Keep the strongest candidate for each start boundary, favoring
+            # a complete ending and proximity to about one minute.
+            rank = score + (5 if sentence_end else 0) - abs(length - target_seconds) * 0.04
+            if best is None or rank > best[0]:
+                best = (rank, result, key)
+            # Once we're well beyond target, don't keep expanding this excerpt.
+            if length >= target_seconds + 10 and sentence_end:
+                break
+        if best:
+            seen_ranges.add(best[2])
+            raw_results.append(best[1])
+
+    # Rank candidates by score (highest first), while reducing near-duplicates.
+    raw_results.sort(key=lambda item: item["score"], reverse=True)
     chosen = []
-    for item in results:
-        if all(item["end"] <= old["start"] or item["start"] >= old["end"] for old in chosen):
+    for item in raw_results:
+        if all(
+            item["end"] <= old["start"] or item["start"] >= old["end"]
+            or (abs(item["start"] - old["start"]) < 8 and abs(item["end"] - old["end"]) < 15)
+            for old in chosen
+        ):
             chosen.append(item)
         if len(chosen) >= limit:
             break
-    return sorted(chosen, key=lambda item: item["start"])
+    return chosen
