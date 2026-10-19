@@ -4,7 +4,7 @@ import unittest
 import wave
 from pathlib import Path
 
-from analyzer import analyze_wav_energy
+from analyzer import analyze_wav_energy, candidates
 
 
 class StreamingWavAnalysisTests(unittest.TestCase):
@@ -40,6 +40,25 @@ class StreamingWavAnalysisTests(unittest.TestCase):
             self.assertAlmostEqual(duration, 2.25, places=2)
             self.assertEqual(len(scores), 3)
             self.assertTrue(any(score > 0 for score in scores))
+
+
+class HighlightCandidateTests(unittest.TestCase):
+    def test_candidates_include_complete_thought_metadata_and_sort_by_score(self):
+        transcript = [
+            {"start": 0.0, "end": 18.0, "text": "The Bible says we must keep our faith because God is faithful."},
+            {"start": 18.2, "end": 37.0, "text": "Listen to me, the promise of God is greater than your problem."},
+            {"start": 37.2, "end": 58.0, "text": "Do not give up, because victory comes through faith in Jesus Christ."},
+            {"start": 58.2, "end": 75.0, "text": "Today we remember that the kingdom of God will never fail."},
+            {"start": 75.2, "end": 95.0, "text": "So keep trusting the Lord, and let your life show his glory."},
+        ]
+        energy = [0.4 + (i % 4) * 0.1 for i in range(100)]
+        results = candidates(transcript, energy, 100, limit=20)
+        self.assertTrue(results)
+        scores = [item["score"] for item in results]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertTrue(all("complete_thought" in item for item in results))
+        self.assertTrue(all(item["duration"] > 0 for item in results))
+        self.assertTrue(all(item["text"].strip() for item in results))
 
 
 if __name__ == "__main__":
