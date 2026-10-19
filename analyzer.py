@@ -146,13 +146,22 @@ def energy_windows(samples, rate, seconds=1):
     return _score_rms(rms)
 
 
-def transcribe(path, model_name="base", progress=None):
-    """Transcribe PCM WAV in 30-second chunks to keep memory bounded."""
+def transcribe(path, model_name="large-v3", progress=None, language="en",
+              device="auto", chunk_seconds=30, overlap_seconds=2,
+              initial_prompt=None):
+    """Transcribe PCM WAV in overlapping chunks with conservative hallucination controls.
+
+    Device 'auto' tries CUDA first, then falls back to CPU if model initialization
+    fails. Each overlap is assigned to one chunk using segment midpoint ownership,
+    preventing duplicate transcript segments while preserving chunk context.
+    """
     try:
         import numpy as np
         from faster_whisper import WhisperModel
     except ImportError as exc:
-        raise RuntimeError("faster-whisper and its NumPy dependency are required. Run INSTALL_AND_RUN.bat.") from exc
+        raise RuntimeError(
+            "faster-whisper and NumPy are required. Run INSTALL_AND_RUN.bat."
+        ) from exc
 
     with wave.open(str(path), "rb") as wf:
         if wf.getcomptype() != "NONE" or wf.getsampwidth() != 2:
@@ -162,43 +171,110 @@ def transcribe(path, model_name="base", progress=None):
         total_frames = wf.getnframes()
         if channels < 1 or rate < 1:
             raise ValueError("The WAV file has invalid channel or sample-rate metadata.")
-        chunk_frames = max(1, rate * 30)
+
+    chunk_frames = max(1, rate * int(chunk_seconds))
+    overlap_frames = max(0, rate * int(overlap_seconds))
+    step_frames = max(1, chunk_frames - overlap_frames)
 
     if progress:
-        progress("Loading Whisper model (first run may download it)…")
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        progress(f"Loading Whisper model {model_name}…")
+
+    model = None
+    chosen_device = device
+    errors = []
+    attempts = [("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", "int8")] if device == "auto" else (
+        [("cuda", "float16"), ("cuda", "int8_float16")] if device == "cuda" else [("cpu", "int8")]
+    )
+    for target_device, compute_type in attempts:
+        try:
+            model = WhisperModel(model_name, device=target_device, compute_type=compute_type)
+            chosen_device = target_device
+            if progress:
+                progress(f"Whisper ready: {model_name} on {target_device} ({compute_type})")
+            break
+        except Exception as exc:
+            errors.append(f"{target_device}/{compute_type}: {exc}")
+    if model is None:
+        raise RuntimeError("Could not initialize Whisper model. " + " | ".join(errors[-3:]))
+
     rows = []
-    language = "unknown"
-    processed_frames = 0
+    detected_language = language or "unknown"
+    start_frame = 0
+    chunk_index = 0
 
     with wave.open(str(path), "rb") as wf:
-        while True:
-            raw = wf.readframes(chunk_frames)
+        while start_frame < total_frames:
+            wf.setpos(start_frame)
+            raw = wf.readframes(min(chunk_frames, total_frames - start_frame))
             if not raw:
                 break
             pcm = np.frombuffer(raw, dtype="<i2")
             frame_count = len(pcm) // channels
             if frame_count == 0:
-                continue
-            mono = pcm[:frame_count * channels].reshape(frame_count, channels).mean(axis=1)
-            audio = (mono.astype(np.float32, copy=False) / 32768.0)
-            chunk_start = processed_frames / rate
-            segments, info = model.transcribe(audio, word_timestamps=False, vad_filter=True)
-            if language == "unknown":
-                language = getattr(info, "language", "unknown")
-            for seg in segments:
-                rows.append({
-                    "start": round(chunk_start + float(seg.start), 3),
-                    "end": round(chunk_start + float(seg.end), 3),
-                    "text": seg.text.strip(),
-                })
-            processed_frames += frame_count
-            if progress and total_frames:
-                progress(f"Transcribing sermon… {min(1.0, processed_frames / total_frames):.0%}")
+                break
+            mono = pcm[:frame_count * channels].reshape(frame_count, channels).astype(np.float32).mean(axis=1)
+            audio = mono / 32768.0
+            chunk_start = start_frame / rate
+            chunk_end = (start_frame + frame_count) / rate
+            is_last = start_frame + frame_count >= total_frames
 
-    if not rows:
+            options = {
+                "language": language or None,
+                "beam_size": 5,
+                "temperature": 0.0,
+                "condition_on_previous_text": False,
+                "vad_filter": True,
+                "word_timestamps": False,
+            }
+            if initial_prompt:
+                options["initial_prompt"] = initial_prompt
+
+            segments, info = model.transcribe(audio, **options)
+            if detected_language in ("unknown", None, ""):
+                detected_language = getattr(info, "language", "unknown")
+
+            # The overlap belongs to the earlier chunk up to the next chunk's
+            # start plus overlap. Keep a segment only in the chunk containing its midpoint.
+            ownership_end = total_frames / rate if is_last else (start_frame + step_frames) / rate
+            for seg in segments:
+                local_start = float(seg.start)
+                local_end = float(seg.end)
+                midpoint = chunk_start + (local_start + local_end) / 2
+                if midpoint < chunk_start - 0.01 or midpoint >= ownership_end:
+                    continue
+                global_start = chunk_start + local_start
+                global_end = min(chunk_end, chunk_start + local_end)
+                text = seg.text.strip()
+                if text and global_end > global_start:
+                    rows.append({
+                        "start": round(max(0.0, global_start), 3),
+                        "end": round(global_end, 3),
+                        "text": text,
+                    })
+
+            chunk_index += 1
+            if progress and total_frames:
+                progress(
+                    f"Transcribing ({chosen_device})… "
+                    f"{min(1.0, (start_frame + frame_count) / total_frames):.0%}"
+                )
+            if is_last:
+                break
+            start_frame += step_frames
+
+    rows.sort(key=lambda item: (item["start"], item["end"]))
+    # Filter exact adjacent duplicate text sometimes emitted by chunk-edge decoding.
+    deduped = []
+    for row in rows:
+        if deduped and row["text"].casefold() == deduped[-1]["text"].casefold() and row["start"] < deduped[-1]["end"] + 0.35:
+            if row["end"] > deduped[-1]["end"]:
+                deduped[-1]["end"] = row["end"]
+            continue
+        deduped.append(row)
+
+    if not deduped:
         raise RuntimeError("No speech detected in this recording.")
-    return rows, language
+    return deduped, detected_language
 
 
 def text_score(text):
