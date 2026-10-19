@@ -8,7 +8,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from analyzer import read_pcm_wav, energy_windows, transcribe, candidates
+from analyzer import analyze_wav_energy, transcribe, candidates
 from scene_detect import probe_duration, detect_cuts, make_scenes
 
 def stamp(seconds):
@@ -114,12 +114,17 @@ class App:
 
     def worker(self):
         try:
-            rate, samples = read_pcm_wav(self.audio)
-            duration = len(samples) / rate
-            energy = energy_windows(samples, rate)
-            del samples
-            transcript, language = transcribe(self.audio, self.model.get(),
-                                              lambda message: self.events.put(("status", message)))
+            duration, energy = analyze_wav_energy(
+                self.audio,
+                progress=lambda fraction: self.events.put(
+                    ("status", f"Analyzing audio energy… {fraction:.0%}")
+                ),
+            )
+            transcript, language = transcribe(
+                self.audio,
+                self.model.get(),
+                lambda message: self.events.put(("status", message)),
+            )
             results = candidates(transcript, energy, duration)
             self.events.put(("done", (results, transcript, language, duration)))
         except Exception as exc:
