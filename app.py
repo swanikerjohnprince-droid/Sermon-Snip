@@ -64,7 +64,8 @@ class App:
         self.audio_label.pack(anchor="w", pady=2)
         self.video_label = ttk.Label(outer, text="Video: none", style="Sub.TLabel")
         self.video_label.pack(anchor="w", pady=2)
-        ttk.Label(outer, text="Candidate highlights", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(12, 5))
+        ttk.Label(outer, text="Candidate highlights — highest score first; hover over an excerpt to read it all",
+                  font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(12, 5))
         self.tree = ttk.Treeview(outer, columns=("score", "start", "end", "text"), show="headings")
         for col, label, width in [("score", "Score", 65), ("start", "Start", 80),
                                   ("end", "End", 80), ("text", "Transcript excerpt", 700)]:
@@ -76,12 +77,69 @@ class App:
         row.pack(fill="x", pady=8)
         ttk.Button(row, text="Export highlights JSON", command=self.export_json).pack(side="left")
         ttk.Button(row, text="Export highlights CSV", command=self.export_csv).pack(side="left", padx=8)
+        self.tree.bind("<Motion>", self.show_excerpt_tooltip)
+        self.tree.bind("<Leave>", self.hide_excerpt_tooltip)
+        self.tooltip = None
+        self.tooltip_row = None
         self.details = tk.Text(outer, height=4, wrap="word", bg="#171e28", fg="#e9eef5",
                                relief="flat", padx=8, pady=6)
         self.details.pack(fill="x")
         self.details.insert("1.0", "Select a result to inspect transcript and scoring signals.")
         self.details.configure(state="disabled")
         ttk.Label(outer, textvariable=self.status, style="Sub.TLabel").pack(anchor="w", pady=(7, 0))
+
+    def show_excerpt_tooltip(self, event):
+        # Show the complete transcript excerpt when hovering over its table cell.
+        row_id = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not row_id or column != "#4":
+            self.hide_excerpt_tooltip()
+            return
+        if row_id == self.tooltip_row:
+            return
+        self.hide_excerpt_tooltip()
+        try:
+            excerpt = self.tree.set(row_id, "text")
+            if not excerpt:
+                return
+            popup = tk.Toplevel(self.root)
+            popup.wm_overrideredirect(True)
+            popup.attributes("-topmost", True)
+            x = min(event.x_root + 18, self.root.winfo_screenwidth() - 600)
+            y = min(event.y_root + 18, self.root.winfo_screenheight() - 300)
+            popup.geometry(f"+{max(0, x)}+{max(0, y)}")
+            frame = tk.Frame(popup, bg="#202a38", bd=1, relief="solid")
+            frame.pack(fill="both", expand=True)
+            tk.Label(
+                frame, text="FULL EXCERPT", anchor="w",
+                bg="#202a38", fg="#9fc5ff", font=("Segoe UI", 9, "bold"),
+                padx=10, pady=6
+            ).pack(fill="x")
+            body = tk.Text(
+                frame, wrap="word", width=72, height=12,
+                bg="#171e28", fg="#e9eef5", relief="flat",
+                padx=10, pady=8, font=("Segoe UI", 10)
+            )
+            scroll = ttk.Scrollbar(frame, orient="vertical", command=body.yview)
+            body.configure(yscrollcommand=scroll.set)
+            body.insert("1.0", excerpt)
+            body.configure(state="disabled")
+            body.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            self.tooltip = popup
+            self.tooltip_row = row_id
+        except tk.TclError:
+            self.tooltip = None
+            self.tooltip_row = None
+
+    def hide_excerpt_tooltip(self, _event=None):
+        if self.tooltip is not None:
+            try:
+                self.tooltip.destroy()
+            except tk.TclError:
+                pass
+        self.tooltip = None
+        self.tooltip_row = None
 
     def choose_audio(self):
         path = filedialog.askopenfilename(filetypes=[("WAV audio", "*.wav")])
@@ -163,6 +221,8 @@ class App:
                     messagebox.showerror("Sermon-Snip — detailed error", data if data.strip() else "Unknown error.")
                 elif kind == "done":
                     self.results, self.transcript, self.language, self.duration = data
+                    # Keep the highest-scoring excerpt at the top of the list.
+                    self.results.sort(key=lambda item: item.get("score", 0), reverse=True)
                     for item in self.tree.get_children():
                         self.tree.delete(item)
                     for i, result in enumerate(self.results):
