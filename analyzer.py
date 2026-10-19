@@ -147,20 +147,58 @@ def energy_windows(samples, rate, seconds=1):
 
 
 def transcribe(path, model_name="base", progress=None):
+    """Transcribe PCM WAV in 30-second chunks to keep memory bounded."""
     try:
+        import numpy as np
         from faster_whisper import WhisperModel
     except ImportError as exc:
-        raise RuntimeError("faster-whisper is missing. Run INSTALL_AND_RUN.bat.") from exc
+        raise RuntimeError("faster-whisper and its NumPy dependency are required. Run INSTALL_AND_RUN.bat.") from exc
+
+    with wave.open(str(path), "rb") as wf:
+        if wf.getcomptype() != "NONE" or wf.getsampwidth() != 2:
+            raise ValueError("Transcription requires uncompressed 16-bit PCM WAV audio.")
+        channels = wf.getnchannels()
+        rate = wf.getframerate()
+        total_frames = wf.getnframes()
+        if channels < 1 or rate < 1:
+            raise ValueError("The WAV file has invalid channel or sample-rate metadata.")
+        chunk_frames = max(1, rate * 30)
+
     if progress:
         progress("Loading Whisper model (first run may download it)…")
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(str(path), word_timestamps=False, vad_filter=True)
     rows = []
-    for seg in segments:
-        rows.append({"start": float(seg.start), "end": float(seg.end), "text": seg.text.strip()})
+    language = "unknown"
+    processed_frames = 0
+
+    with wave.open(str(path), "rb") as wf:
+        while True:
+            raw = wf.readframes(chunk_frames)
+            if not raw:
+                break
+            pcm = np.frombuffer(raw, dtype="<i2")
+            frame_count = len(pcm) // channels
+            if frame_count == 0:
+                continue
+            mono = pcm[:frame_count * channels].reshape(frame_count, channels).mean(axis=1)
+            audio = (mono.astype(np.float32, copy=False) / 32768.0)
+            chunk_start = processed_frames / rate
+            segments, info = model.transcribe(audio, word_timestamps=False, vad_filter=True)
+            if language == "unknown":
+                language = getattr(info, "language", "unknown")
+            for seg in segments:
+                rows.append({
+                    "start": round(chunk_start + float(seg.start), 3),
+                    "end": round(chunk_start + float(seg.end), 3),
+                    "text": seg.text.strip(),
+                })
+            processed_frames += frame_count
+            if progress and total_frames:
+                progress(f"Transcribing sermon… {min(1.0, processed_frames / total_frames):.0%}")
+
     if not rows:
         raise RuntimeError("No speech detected in this recording.")
-    return rows, getattr(info, "language", "unknown")
+    return rows, language
 
 
 def text_score(text):
