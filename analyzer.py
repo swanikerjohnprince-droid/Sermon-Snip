@@ -5,36 +5,9 @@ import sys
 import wave
 from pathlib import Path
 
-import os
-import nvidia.cublas
-import nvidia.cudnn
-
-# Explicitly add NVIDIA DLL directories to the Windows DLL search path.
-_CUDA_DLL_HANDLES = []
-for pkg in (nvidia.cublas, nvidia.cudnn):
-    bin_dir = os.path.join(os.path.dirname(pkg.__file__), "bin")
-    if os.path.exists(bin_dir):
-        _CUDA_DLL_HANDLES.append(os.add_dll_directory(bin_dir))
-
-
 # Keep DLL-directory handles alive for the lifetime of the process. On Windows,
 # closing/garbage-collecting these handles unregisters the DLL search folders.
 _CUDA_DLL_HANDLES = []
-
-try:
-    import nvidia.cublas.bin
-    import nvidia.cudnn.bin
-
-    _CUDA_DLL_HANDLES.append(
-        os.add_dll_directory(os.path.dirname(nvidia.cublas.bin.__file__))
-    )
-    _CUDA_DLL_HANDLES.append(
-        os.add_dll_directory(os.path.dirname(nvidia.cudnn.bin.__file__))
-    )
-except (ImportError, AttributeError, OSError):
-    # Optional pip-installed CUDA libraries; the fallback search below can
-    # still discover a system CUDA Toolkit installation.
-    pass
 
 PHRASES = [
     "remember", "listen", "behold", "never", "always", "today", "right now",
