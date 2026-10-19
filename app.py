@@ -191,7 +191,7 @@ class App:
                 model_name,
                 progress=lambda message: self.events.put(("status", message)),
                 language="en",
-                device="auto",
+                device="cuda",
                 chunk_seconds=30,
                 overlap_seconds=2,
                 initial_prompt=vocabulary or None,
