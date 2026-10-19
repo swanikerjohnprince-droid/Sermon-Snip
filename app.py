@@ -28,7 +28,8 @@ class App:
         self.events = queue.Queue()
         self.duration = 0
         self.language = "unknown"
-        self.model = tk.StringVar(value="base")
+        self.model = tk.StringVar(value="large-v3")
+        self.vocabulary = tk.StringVar(value="")
         self.status = tk.StringVar(value="Choose a sermon WAV to begin.")
         self.build_ui()
         root.after(150, self.poll)
@@ -56,8 +57,11 @@ class App:
         ttk.Button(bar, text="Choose sermon audio (PCM WAV)", command=self.choose_audio).pack(side="left")
         ttk.Button(bar, text="Choose video for scene cuts", command=self.choose_video).pack(side="left", padx=6)
         ttk.Label(bar, text="Model").pack(side="left", padx=(8, 3))
-        ttk.Combobox(bar, textvariable=self.model, values=["tiny", "base", "small"],
-                     width=7, state="readonly").pack(side="left")
+        ttk.Combobox(bar, textvariable=self.model,
+                     values=["medium", "distil-large-v3", "large-v3"],
+                     width=17, state="readonly").pack(side="left")
+        ttk.Label(bar, text="Sermon vocabulary (optional)").pack(side="left", padx=(8, 3))
+        ttk.Entry(bar, textvariable=self.vocabulary, width=28).pack(side="left")
         ttk.Button(bar, text="Analyze audio", command=self.analyze).pack(side="left", padx=6)
         ttk.Button(bar, text="Detect cuts", command=self.detect).pack(side="left")
         self.audio_label = ttk.Label(outer, text="Audio: none", style="Sub.TLabel")
@@ -168,9 +172,13 @@ class App:
             messagebox.showerror("Audio format", f"Please use uncompressed 16-bit PCM WAV.\n\n{exc}")
             return
         self.status.set("Analyzing audio and transcribing…")
-        threading.Thread(target=self.worker, daemon=True).start()
+        threading.Thread(
+            target=self.worker,
+            args=(self.model.get(), self.vocabulary.get().strip()),
+            daemon=True,
+        ).start()
 
-    def worker(self):
+    def worker(self, model_name="large-v3", vocabulary=""):
         try:
             duration, energy = analyze_wav_energy(
                 self.audio,
@@ -180,8 +188,13 @@ class App:
             )
             transcript, language = transcribe(
                 self.audio,
-                self.model.get(),
-                lambda message: self.events.put(("status", message)),
+                model_name,
+                progress=lambda message: self.events.put(("status", message)),
+                language="en",
+                device="auto",
+                chunk_seconds=30,
+                overlap_seconds=2,
+                initial_prompt=vocabulary or None,
             )
             results = candidates(transcript, energy, duration)
             self.events.put(("done", (results, transcript, language, duration)))
