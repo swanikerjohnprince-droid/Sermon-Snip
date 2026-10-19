@@ -5,6 +5,25 @@ import sys
 import wave
 from pathlib import Path
 
+# Keep DLL-directory handles alive for the lifetime of the process. On Windows,
+# closing/garbage-collecting these handles unregisters the DLL search folders.
+_CUDA_DLL_HANDLES = []
+
+try:
+    import nvidia.cublas.bin
+    import nvidia.cudnn.bin
+
+    _CUDA_DLL_HANDLES.append(
+        os.add_dll_directory(os.path.dirname(nvidia.cublas.bin.__file__))
+    )
+    _CUDA_DLL_HANDLES.append(
+        os.add_dll_directory(os.path.dirname(nvidia.cudnn.bin.__file__))
+    )
+except (ImportError, AttributeError, OSError):
+    # Optional pip-installed CUDA libraries; the fallback search below can
+    # still discover a system CUDA Toolkit installation.
+    pass
+
 PHRASES = [
     "remember", "listen", "behold", "never", "always", "today", "right now",
     "i declare", "i decree", "the truth", "listen to me", "don't give up",
@@ -174,7 +193,7 @@ def _prepare_windows_cuda_dll_search():
         try:
             resolved = str(folder.resolve())
             if folder.is_dir() and resolved.lower() not in seen:
-                os.add_dll_directory(resolved)
+                _CUDA_DLL_HANDLES.append(os.add_dll_directory(resolved))
                 seen.add(resolved.lower())
                 added.append(resolved)
         except (OSError, RuntimeError):
