@@ -17,6 +17,10 @@ AI-assisted sermon highlight finder for Windows and DaVinci Resolve 21 Free.
 3. Choose a PCM WAV and click **Analyze audio**. First run downloads the Whisper model.
 4. For scene cuts, install FFmpeg and ensure `ffmpeg` and `ffprobe` are on PATH.
 
+## NVIDIA GPU setup
+
+If you see `cublas64_12.dll is not found or cannot be loaded`, follow [GPU_SETUP.md](GPU_SETUP.md). Sermon-Snip now requires GPU mode and does not silently fall back to CPU.
+
 ## Known limitations
 - This is a companion desktop app, not a docked native Resolve panel.
 - Automatic subject tracking, 9:16 reframing, and AutoSubs triggering are not implemented yet.
