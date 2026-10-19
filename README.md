@@ -5,6 +5,8 @@ AI-assisted sermon highlight finder for Windows and DaVinci Resolve 21 Free.
 ## Current prototype
 - Transcribes an uncompressed PCM WAV with faster-whisper.
 - Ranks candidate highlights using transcript phrase signals and audio energy.
+- Builds excerpts around roughly 60 seconds, preferring sentence-ending boundaries to preserve complete thoughts; shorter impactful clips can still rank.
+- Sorts results from highest score to lowest and shows the full transcript excerpt in a hover preview.
 - Uses compact audio arrays to avoid the original Python-list MemoryError.
 - Optionally detects likely visual cuts with FFmpeg.
 - Exports JSON/CSV and includes a DaVinci Resolve script to add timeline markers.
