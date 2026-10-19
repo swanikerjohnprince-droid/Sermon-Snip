@@ -1,7 +1,9 @@
 import array
 import math
+import os
 import sys
 import wave
+from pathlib import Path
 
 PHRASES = [
     "remember", "listen", "behold", "never", "always", "today", "right now",
@@ -146,15 +148,49 @@ def energy_windows(samples, rate, seconds=1):
     return _score_rms(rms)
 
 
+def _prepare_windows_cuda_dll_search():
+    """Register common CUDA/cuDNN DLL folders before CTranslate2 is imported."""
+    if os.name != "nt":
+        return []
+    candidates = []
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        candidates.append(Path(cuda_path) / "bin")
+    candidates.extend(Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p)
+    program_files = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+    cuda_root = program_files / "NVIDIA GPU Computing Toolkit" / "CUDA"
+    if cuda_root.is_dir():
+        candidates.extend(version / "bin" for version in sorted(cuda_root.glob("v*"), reverse=True))
+    try:
+        import site
+        for root in site.getsitepackages():
+            package_root = Path(root)
+            for pattern in ("nvidia/cublas/bin", "nvidia/cublas/lib", "nvidia/cudnn/bin", "nvidia/cudnn/lib"):
+                candidates.extend(package_root.glob(pattern))
+    except Exception:
+        pass
+    added, seen = [], set()
+    for folder in candidates:
+        try:
+            resolved = str(folder.resolve())
+            if folder.is_dir() and resolved.lower() not in seen:
+                os.add_dll_directory(resolved)
+                seen.add(resolved.lower())
+                added.append(resolved)
+        except (OSError, RuntimeError):
+            continue
+    return added
+
 def transcribe(path, model_name="large-v3", progress=None, language="en",
               device="auto", chunk_seconds=30, overlap_seconds=2,
               initial_prompt=None):
     """Transcribe PCM WAV in overlapping chunks with conservative hallucination controls.
 
-    Device 'auto' tries CUDA first, then falls back to CPU if model initialization
-    fails. Each overlap is assigned to one chunk using segment midpoint ownership,
+    GPU mode is strict when device='cuda': it never silently falls back to CPU.
+    Each overlap is assigned to one chunk using segment midpoint ownership,
     preventing duplicate transcript segments while preserving chunk context.
     """
+    _prepare_windows_cuda_dll_search()
     try:
         import numpy as np
         from faster_whisper import WhisperModel
@@ -179,12 +215,10 @@ def transcribe(path, model_name="large-v3", progress=None, language="en",
     if progress:
         progress(f"Loading Whisper model {model_name}…")
 
-    model = None
-    chosen_device = device
     errors = []
-    attempts = [("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", "int8")] if device == "auto" else (
-        [("cuda", "float16"), ("cuda", "int8_float16")] if device == "cuda" else [("cpu", "int8")]
-    )
+    attempts = [("cuda", "float16"), ("cuda", "int8_float16")] if device in ("auto", "cuda") else [("cpu", "int8")]
+    model = None
+    chosen_device = "cuda" if device in ("auto", "cuda") else "cpu"
     for target_device, compute_type in attempts:
         try:
             model = WhisperModel(model_name, device=target_device, compute_type=compute_type)
@@ -194,23 +228,16 @@ def transcribe(path, model_name="large-v3", progress=None, language="en",
             break
         except Exception as exc:
             errors.append(f"{target_device}/{compute_type}: {exc}")
-            # CUDA libraries may be installed incorrectly even though model
-            # construction succeeds. Defer a safe CPU fallback until inference.
-            if target_device == "cuda":
-                model = None
-                continue
+            model = None
     if model is None:
-        if progress:
-            progress("CUDA initialization failed; loading Whisper on CPU (int8)…")
-        try:
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
-            chosen_device = "cpu"
-        except Exception as exc:
+        detail = " | ".join(errors[-2:])
+        if chosen_device == "cuda":
             raise RuntimeError(
-                "Could not initialize Whisper on GPU or CPU. "
-                + " | ".join(errors[-3:])
-                + f" | CPU/int8: {exc}"
-            ) from exc
+                "Sermon-Snip is configured for NVIDIA GPU transcription, and CUDA could not start. "
+                "No CPU fallback was used. Install CUDA 12 cuBLAS and cuDNN 9, make sure their DLL "
+                "folders are visible to this app, then restart it. Details: " + detail
+            )
+        raise RuntimeError("Could not initialize Whisper: " + detail)
 
     rows = []
     detected_language = language or "unknown"
@@ -257,13 +284,10 @@ def transcribe(path, model_name="large-v3", progress=None, language="en",
                 )
                 if not cuda_failure:
                     raise
-                if progress:
-                    progress("CUDA runtime libraries unavailable; retrying transcription on CPU (int8)…")
-                del model
-                model = WhisperModel(model_name, device="cpu", compute_type="int8")
-                chosen_device = "cpu"
-                segments, info = model.transcribe(audio, **options)
-                segments = list(segments)
+                raise RuntimeError(
+                    "NVIDIA GPU transcription failed while processing audio. Sermon-Snip did not switch to CPU. "
+                    "Install CUDA 12 cuBLAS and cuDNN 9, then restart the app. Original error: " + str(exc)
+                ) from exc
 
             if detected_language in ("unknown", None, ""):
                 detected_language = getattr(info, "language", "unknown")
