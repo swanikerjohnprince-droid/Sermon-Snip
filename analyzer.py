@@ -194,8 +194,23 @@ def transcribe(path, model_name="large-v3", progress=None, language="en",
             break
         except Exception as exc:
             errors.append(f"{target_device}/{compute_type}: {exc}")
+            # CUDA libraries may be installed incorrectly even though model
+            # construction succeeds. Defer a safe CPU fallback until inference.
+            if target_device == "cuda":
+                model = None
+                continue
     if model is None:
-        raise RuntimeError("Could not initialize Whisper model. " + " | ".join(errors[-3:]))
+        if progress:
+            progress("CUDA initialization failed; loading Whisper on CPU (int8)…")
+        try:
+            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            chosen_device = "cpu"
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not initialize Whisper on GPU or CPU. "
+                + " | ".join(errors[-3:])
+                + f" | CPU/int8: {exc}"
+            ) from exc
 
     rows = []
     detected_language = language or "unknown"
@@ -229,7 +244,27 @@ def transcribe(path, model_name="large-v3", progress=None, language="en",
             if initial_prompt:
                 options["initial_prompt"] = initial_prompt
 
-            segments, info = model.transcribe(audio, **options)
+            try:
+                segments, info = model.transcribe(audio, **options)
+                # faster-whisper yields segments lazily; CUDA library failures can
+                # therefore occur here, not during model construction.
+                segments = list(segments)
+            except RuntimeError as exc:
+                message = str(exc).lower()
+                cuda_failure = chosen_device == "cuda" and (
+                    "cublas" in message or "cudnn" in message
+                    or "cuda" in message or "cannot be loaded" in message
+                )
+                if not cuda_failure:
+                    raise
+                if progress:
+                    progress("CUDA runtime libraries unavailable; retrying transcription on CPU (int8)…")
+                del model
+                model = WhisperModel(model_name, device="cpu", compute_type="int8")
+                chosen_device = "cpu"
+                segments, info = model.transcribe(audio, **options)
+                segments = list(segments)
+
             if detected_language in ("unknown", None, ""):
                 detected_language = getattr(info, "language", "unknown")
 
