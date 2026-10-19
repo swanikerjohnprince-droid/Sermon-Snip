@@ -22,4 +22,6 @@ AI-assisted sermon highlight finder for Windows and DaVinci Resolve 21 Free.
 - Timeline marker times assume the source audio starts at timeline time zero.
 
 ## MemoryError fix
-The WAV reader uses `array.array` rather than a Python list of millions of float objects. For extremely long/high-rate stereo files, create a mono 16-bit PCM WAV analysis copy. Keep your original media unchanged.
+Audio-energy analysis now reads the WAV in 10-second chunks and stores only one score per analysis window. Whisper transcription also reads and transcribes 30-second chunks instead of decoding the entire recording into memory. This is designed to avoid the original full-file allocation that caused `MemoryError`. Input must be uncompressed 16-bit PCM WAV; your original media is not modified.
+
+The repository includes unit tests for mono and stereo WAV analysis across chunk boundaries. GitHub Actions runs them on pushes and pull requests.
